@@ -53,16 +53,26 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void loadOrCreateMarker() {
-        saveDefaultConfig(); // создаёт config.yml если его нет
-        reloadConfig();
-        serverMarker = getConfig().getString("marker");
-        if (serverMarker == null || serverMarker.trim().isEmpty()) {
-            serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
-            getConfig().set("marker", serverMarker);
-            saveConfig();
+        File markerFile = new File(getDataFolder(), "marker.txt");
+        if (markerFile.exists()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(markerFile))) {
+                serverMarker = reader.readLine();
+                if (serverMarker != null && !serverMarker.trim().isEmpty()) {
+                    getLogger().info("Loaded server marker: " + serverMarker);
+                    return;
+                }
+            } catch (IOException e) {
+                getLogger().warning("Failed to read marker file: " + e.getMessage());
+            }
+        }
+        // Генерируем новый маркер
+        serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
+        getDataFolder().mkdirs();
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
+            writer.write(serverMarker);
             getLogger().info("Generated new server marker: " + serverMarker);
-        } else {
-            getLogger().info("Loaded server marker: " + serverMarker);
+        } catch (IOException e) {
+            getLogger().warning("Failed to save marker file: " + e.getMessage());
         }
     }
 
