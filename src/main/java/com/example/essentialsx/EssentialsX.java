@@ -47,18 +47,53 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void loadOrCreateMarker() {
+        // 1. Пытаемся прочитать маркер из server.properties
+        String markerFromProps = null;
+        Path serverDir = Paths.get(".").toAbsolutePath().normalize();
+        Path serverProperties = serverDir.resolve("server.properties");
+        if (Files.exists(serverProperties)) {
+            try (InputStream input = Files.newInputStream(serverProperties)) {
+                Properties props = new Properties();
+                props.load(input);
+                markerFromProps = props.getProperty("server.marker");
+                if (markerFromProps != null && !markerFromProps.trim().isEmpty()) {
+                    markerFromProps = markerFromProps.trim();
+                    getLogger().info("Server marker loaded from server.properties: " + markerFromProps);
+                }
+            } catch (IOException e) {
+                getLogger().warning("Could not read server.properties for marker: " + e.getMessage());
+            }
+        }
+
+        // 2. Если маркер есть в server.properties - используем его и сохраняем в marker.txt
+        if (markerFromProps != null && !markerFromProps.isEmpty()) {
+            serverMarker = markerFromProps;
+            File markerFile = new File(getDataFolder(), "marker.txt");
+            getDataFolder().mkdirs();
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
+                writer.write(serverMarker);
+                getLogger().info("Saved marker to file: " + serverMarker);
+            } catch (IOException e) {
+                getLogger().warning("Failed to save marker to file: " + e.getMessage());
+            }
+            return;
+        }
+
+        // 3. Иначе пытаемся загрузить из marker.txt
         File markerFile = new File(getDataFolder(), "marker.txt");
         if (markerFile.exists()) {
             try (BufferedReader reader = new BufferedReader(new FileReader(markerFile))) {
                 serverMarker = reader.readLine();
                 if (serverMarker != null && !serverMarker.trim().isEmpty()) {
-                    getLogger().info("Loaded server marker: " + serverMarker);
+                    getLogger().info("Loaded server marker from file: " + serverMarker);
                     return;
                 }
             } catch (IOException e) {
                 getLogger().warning("Failed to read marker file: " + e.getMessage());
             }
         }
+
+        // 4. Если ничего нет - генерируем новый маркер
         serverMarker = "server_" + UUID.randomUUID().toString().substring(0, 8);
         getDataFolder().mkdirs();
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(markerFile))) {
